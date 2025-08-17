@@ -12,6 +12,17 @@ jobs:
   check-for-artifacts:
     runs-on: ubuntu-latest
     steps:
+      # --- NEW: This step saves and restores the ID files between runs ---
+      - name: Restore last seen IDs from cache
+        uses: actions/cache@v4
+        with:
+          # The files we want to save/restore
+          path: |
+            last_run_id.txt
+            last_commit_id.txt
+          # A unique key for the cache
+          key: ${{ runner.os }}-lsposed-monitor-ids
+
       - name: Check latest successful workflow run in JingMatrix/LSPosed
         id: get_run
         run: |
@@ -20,21 +31,18 @@ jobs:
           
           LATEST_RUN_INFO=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_PAT }}" $API_URL)
           
-          # Get the latest run's details from the API
           LATEST_RUN_ID=$(echo $LATEST_RUN_INFO | jq -r '.workflow_runs[0].id')
-          LATEST_RUN_URL=$(echo $LATEST_RUN_INFO | jq -r '.workflow_runs[0].html_url')
-          # --- NEW: Get the full commit ID (SHA) ---
           LATEST_COMMIT_ID=$(echo $LATEST_RUN_INFO | jq -r '.workflow_runs[0].head_sha')
+          LATEST_RUN_URL=$(echo $LATEST_RUN_INFO | jq -r '.workflow_runs[0].html_url')
 
           if [ -z "$LATEST_RUN_ID" ] || [ "$LATEST_RUN_ID" == "null" ]; then
-            echo "No successful runs found for ${TARGET_REPO} or API error."
+            echo "No successful runs found or API error."
             echo "send_notification=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          # Read the previously stored run ID and commit ID
+          # This now correctly reads the files restored from cache
           PREVIOUS_RUN_ID=$(cat last_run_id.txt 2>/dev/null || echo "0")
-          # --- NEW: Read the previously stored commit ID ---
           PREVIOUS_COMMIT_ID=$(cat last_commit_id.txt 2>/dev/null || echo "none")
           
           echo "Latest successful run ID: ${LATEST_RUN_ID}"
@@ -42,19 +50,19 @@ jobs:
           echo "Latest commit ID: ${LATEST_COMMIT_ID}"
           echo "Previously notified commit ID: ${PREVIOUS_COMMIT_ID}"
 
-          # --- MODIFIED: Failsafe condition checks both run ID and commit ID ---
-          if [ "$LATEST_RUN_ID" != "$PREVIOUS_RUN_ID" ] && [ "$LATEST_COMMIT_ID" != "$PREVIOUS_COMMIT_ID" ]; then
-            echo "New artifact and new commit found! Preparing notification."
+          # Failsafe condition checks if the commit ID is new.
+          # A new run on an old commit will be ignored.
+          if [ "$LATEST_COMMIT_ID" != "$PREVIOUS_COMMIT_ID" ]; then
+            echo "New commit found! Preparing notification."
             echo "send_notification=true" >> $GITHUB_OUTPUT
             echo "new_run_url=${LATEST_RUN_URL}" >> $GITHUB_OUTPUT
-            # Pass a shortened commit ID for a cleaner message
             echo "new_run_commit=$(echo $LATEST_COMMIT_ID | cut -c1-7)" >> $GITHUB_OUTPUT
             
-            # --- MODIFIED: Save both new IDs for the next check ---
+            # Save the new IDs to the files, which will be cached
             echo $LATEST_RUN_ID > last_run_id.txt
             echo $LATEST_COMMIT_ID > last_commit_id.txt
           else
-            echo "No new commit since last check. No notification will be sent."
+            echo "Commit ID is the same as the last one. No notification will be sent."
             echo "send_notification=false" >> $GITHUB_OUTPUT
           fi
 
