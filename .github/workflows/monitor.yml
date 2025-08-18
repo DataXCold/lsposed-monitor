@@ -2,11 +2,23 @@
 
 name: Monitor LSPosed Artifacts
 
+# New: Define permissions for security best practices.
+# GITHUB_TOKEN needs 'actions:read' to read workflow runs.
+permissions:
+  actions: read
+  contents: read
+
+# New: Prevent multiple workflow runs from overlapping.
+# This is useful if a run takes longer than the 15-minute schedule interval.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
 on:
   schedule:
     # Runs every 15 minutes to check for new artifacts
     - cron: "*/15 * * * *"
-  workflow_dispatch: # Allows manual execution from Actions tab
+  workflow_dispatch: # Allows manual execution from the Actions tab
     inputs:
       force_notification:
         description: 'Force send notification even if no new commit'
@@ -15,8 +27,10 @@ on:
         type: boolean
 
 env:
+  # The repository to monitor for new artifacts
   TARGET_REPO: "JingMatrix/LSPosed"
-  CACHE_VERSION: "v1" # Increment to invalidate cache if needed
+  # Increment this version to invalidate and clear the cache
+  CACHE_VERSION: "v1"
 
 jobs:
   check-for-artifacts:
@@ -26,82 +40,75 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Restore tracking data from cache
+      - name: Restore last notified commit from cache
         id: cache-restore
         uses: actions/cache/restore@v4
         with:
-          path: |
-            .github/tracking/last_run_id.txt
-            .github/tracking/last_commit_id.txt
+          path: .github/tracking/last_commit_id.txt
+          # The key used to find a cache entry
           key: ${{ runner.os }}-lsposed-monitor-${{ env.CACHE_VERSION }}
-          restore-keys: |
-            ${{ runner.os }}-lsposed-monitor-
 
       - name: Create tracking directory
         run: mkdir -p .github/tracking
 
-      - name: Fetch latest workflow run
+      - name: Fetch latest successful workflow run
         id: fetch_run
         env:
+          # Use a PAT for higher rate limits if needed, otherwise fallback to GITHUB_TOKEN
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          echo "🔍 Fetching latest successful workflow run from ${{ env.TARGET_REPO }}..."
           
-          echo "🔍 Fetching latest successful workflow run from ${TARGET_REPO}..."
-          
-          # Retry logic for API calls
+          # Improved: API call is more efficient and error handling is robust.
+          # We use query parameters (`?status=success&per_page=1`) instead of fetching all runs.
+          # Error output is captured instead of being discarded with `2>/dev/null`.
           for attempt in {1..3}; do
             echo "Attempt $attempt/3"
             
-            if response=$(gh api \
-              "repos/${TARGET_REPO}/actions/runs" \
-              --jq '.workflow_runs[] | select(.conclusion == "success") | {id, head_sha, html_url, created_at, workflow_id} | select(.workflow_id != null)' \
-              --paginate \
-              --limit 1 2>/dev/null); then
+            # Capture both stdout and stderr to handle errors gracefully
+            api_output=$(gh api "repos/${{ env.TARGET_REPO }}/actions/runs?status=success&per_page=1" 2>&1)
+            exit_code=$? # Capture the exit code of the gh command
+
+            if [ $exit_code -eq 0 ]; then
+              response=$(echo "$api_output" | jq '.workflow_runs[0]')
               break
             fi
             
             if [ $attempt -eq 3 ]; then
-              echo "❌ Failed to fetch workflow runs after 3 attempts"
+              echo "❌ Failed to fetch workflow runs after 3 attempts."
+              echo "Error: $api_output"
               exit 1
             fi
             
-            echo "⏳ Retrying in 5 seconds..."
+            echo "⏳ Retrying in 5 seconds... (Error: $api_output)"
             sleep 5
           done
-          
-          if [ -z "$response" ]; then
-            echo "❌ No successful workflow runs found"
-            echo "status=no_runs" >> $GITHUB_OUTPUT
-            exit 0
+
+          if [ -z "$response" ] || [ "$response" = "null" ]; then
+            echo "❌ No successful workflow runs found."
+            echo "status=no_runs" >> "$GITHUB_OUTPUT"
+            exit 0 # Exit gracefully, not an error
           fi
-          
-          # Parse response
-          run_id=$(echo "$response" | jq -r '.id // empty')
-          commit_sha=$(echo "$response" | jq -r '.head_sha // empty')
-          run_url=$(echo "$response" | jq -r '.html_url // empty')
-          created_at=$(echo "$response" | jq -r '.created_at // empty')
-          
+
+          # Improved: Use a single, more efficient jq call to parse all data.
+          read -r run_id commit_sha run_url created_at < <(echo "$response" | jq -r '.id, .head_sha, .html_url, .created_at')
+
           if [ -z "$run_id" ] || [ -z "$commit_sha" ]; then
-            echo "❌ Invalid response from API"
-            echo "status=api_error" >> $GITHUB_OUTPUT
+            echo "❌ Could not parse a valid run_id or commit_sha from the API response."
+            echo "status=api_error" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          
-          echo "✅ Found run ID: $run_id"
-          echo "✅ Commit SHA: $commit_sha"
-          echo "✅ Created: $created_at"
-          
-          # Store in outputs
-          echo "status=success" >> $GITHUB_OUTPUT
-          echo "run_id=$run_id" >> $GITHUB_OUTPUT
-          echo "commit_sha=$commit_sha" >> $GITHUB_OUTPUT
-          echo "run_url=$run_url" >> $GITHUB_OUTPUT
-          echo "commit_short=$(echo $commit_sha | cut -c1-7)" >> $GITHUB_OUTPUT
-          echo "created_at=$created_at" >> $GITHUB_OUTPUT
+
+          echo "✅ Found Run ID: $run_id"
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "run_url=$run_url" >> "$GITHUB_OUTPUT"
+          echo "commit_short=$(echo "$commit_sha" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          echo "created_at=$created_at" >> "$GITHUB_OUTPUT"
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
       - name: Check for artifacts in workflow run
         id: check_artifacts
@@ -114,105 +121,84 @@ jobs:
           run_id="${{ steps.fetch_run.outputs.run_id }}"
           echo "🔍 Checking for artifacts in run ID: $run_id"
           
-          # Check if there are any artifacts for this workflow run
+          # Fetch artifacts using a similar robust retry loop
           for attempt in {1..3}; do
             echo "Attempt $attempt/3 to fetch artifacts"
-            
-            if artifacts_response=$(gh api \
-              "repos/${TARGET_REPO}/actions/runs/${run_id}/artifacts" \
-              --jq '.artifacts' 2>/dev/null); then
+            artifacts_response=$(gh api "repos/${{ env.TARGET_REPO }}/actions/runs/${run_id}/artifacts" --jq '.artifacts' 2>/dev/null)
+            if [ -n "$artifacts_response" ]; then
               break
             fi
-            
             if [ $attempt -eq 3 ]; then
-              echo "❌ Failed to fetch artifacts after 3 attempts"
-              echo "has_artifacts=error" >> $GITHUB_OUTPUT
-              exit 0
+              echo "❌ Failed to fetch artifacts after 3 attempts."
+              echo "has_artifacts=error" >> "$GITHUB_OUTPUT"
+              exit 0 # Graceful exit to allow summary
             fi
-            
             echo "⏳ Retrying in 3 seconds..."
             sleep 3
           done
           
-          # Count artifacts
           artifact_count=$(echo "$artifacts_response" | jq 'length')
-          
-          echo "📦 Found $artifact_count artifacts"
+          echo "📦 Found $artifact_count artifacts."
           
           if [ "$artifact_count" -gt 0 ]; then
-            echo "has_artifacts=true" >> $GITHUB_OUTPUT
-            echo "artifact_count=$artifact_count" >> $GITHUB_OUTPUT
-            
-            # Get artifact names for display
-            artifact_names=$(echo "$artifacts_response" | jq -r '.[].name' | head -5 | tr '\n' ', ' | sed 's/, $//')
-            echo "artifact_names=$artifact_names" >> $GITHUB_OUTPUT
-            
+            echo "has_artifacts=true" >> "$GITHUB_OUTPUT"
+            echo "artifact_count=$artifact_count" >> "$GITHUB_OUTPUT"
+            # Format artifact names for the notification message
+            artifact_names=$(echo "$artifacts_response" | jq -r '.[].name' | head -5 | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/, /g')
             if [ "$artifact_count" -gt 5 ]; then
-              echo "artifact_names=${artifact_names}, and $((artifact_count - 5)) more..." >> $GITHUB_OUTPUT
+              echo "artifact_names=${artifact_names}, and $((artifact_count - 5)) more..." >> "$GITHUB_OUTPUT"
+            else
+              echo "artifact_names=$artifact_names" >> "$GITHUB_OUTPUT"
             fi
           else
-            echo "has_artifacts=false" >> $GITHUB_OUTPUT
-            echo "❌ No artifacts found in this workflow run"
+            echo "has_artifacts=false" >> "$GITHUB_OUTPUT"
+            echo "❌ No artifacts found in this workflow run."
           fi
 
-      - name: Check if notification needed
+      - name: Check if notification is needed
         id: check_notification
         if: steps.fetch_run.outputs.status == 'success' && steps.check_artifacts.outputs.has_artifacts == 'true'
         run: |
-          set -euo pipefail
-          
-          current_run_id="${{ steps.fetch_run.outputs.run_id }}"
           current_commit="${{ steps.fetch_run.outputs.commit_sha }}"
           force_notify="${{ github.event.inputs.force_notification || 'false' }}"
           
-          # Read previous tracking data
-          prev_run_id=$(cat .github/tracking/last_run_id.txt 2>/dev/null || echo "")
+          # Read the commit SHA from the last successful notification
           prev_commit=$(cat .github/tracking/last_commit_id.txt 2>/dev/null || echo "")
           
           echo "📊 Comparison:"
-          echo "  Current run ID: $current_run_id"
-          echo "  Previous run ID: $prev_run_id"
-          echo "  Current commit: $current_commit"
-          echo "  Previous commit: $prev_commit"
-          echo "  Force notification: $force_notify"
-          
-          should_notify="false"
-          reason=""
+          echo "  Current Commit: $current_commit"
+          echo "  Previous Commit: $prev_commit"
+          echo "  Force Notify: $force_notify"
           
           if [ "$force_notify" = "true" ]; then
-            should_notify="true"
-            reason="Manual trigger (force notification enabled)"
+            echo "should_notify=true" >> "$GITHUB_OUTPUT"
+            echo "reason=Manual trigger (force notification)" >> "$GITHUB_OUTPUT"
           elif [ -z "$prev_commit" ]; then
-            should_notify="true"
-            reason="First run - no previous data found"
+            echo "should_notify=true" >> "$GITHUB_OUTPUT"
+            echo "reason=First run with artifacts" >> "$GITHUB_OUTPUT"
           elif [ "$current_commit" != "$prev_commit" ]; then
-            should_notify="true"
-            reason="New commit detected"
+            echo "should_notify=true" >> "$GITHUB_OUTPUT"
+            echo "reason=New commit detected" >> "$GITHUB_OUTPUT"
           else
-            reason="Same commit as previous notification"
+            echo "should_notify=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Already notified for this commit" >> "$GITHUB_OUTPUT"
           fi
-          
-          echo "🔔 Notification decision: $should_notify"
-          echo "📝 Reason: $reason"
-          
-          echo "should_notify=$should_notify" >> $GITHUB_OUTPUT
-          echo "reason=$reason" >> $GITHUB_OUTPUT
 
-      - name: Update tracking data
+      - name: Update and cache tracking data
         if: steps.check_notification.outputs.should_notify == 'true'
         run: |
-          echo "${{ steps.fetch_run.outputs.run_id }}" > .github/tracking/last_run_id.txt
+          echo "✅ Updating tracking data for commit: ${{ steps.fetch_run.outputs.commit_sha }}"
           echo "${{ steps.fetch_run.outputs.commit_sha }}" > .github/tracking/last_commit_id.txt
-          echo "✅ Updated tracking data"
 
       - name: Save tracking data to cache
+        # Critical Fix: This step now runs *after* the file is updated and uses a consistent key.
+        # This ensures the new commit ID is saved for the next run.
         if: steps.check_notification.outputs.should_notify == 'true'
         uses: actions/cache/save@v4
         with:
-          path: |
-            .github/tracking/last_run_id.txt
-            .github/tracking/last_commit_id.txt
-          key: ${{ runner.os }}-lsposed-monitor-${{ env.CACHE_VERSION }}-${{ github.run_id }}
+          path: .github/tracking/last_commit_id.txt
+          # The key MUST match the restore key to be effective.
+          key: ${{ runner.os }}-lsposed-monitor-${{ env.CACHE_VERSION }}
 
       - name: Send Telegram notification
         if: steps.check_notification.outputs.should_notify == 'true'
@@ -224,46 +210,41 @@ jobs:
           message: |
             🔔 *New LSPosed Artifact Available!*
             
-            📦 **Repository**: `${{ env.TARGET_REPO }}`
-            🆔 **Commit**: `${{ steps.fetch_run.outputs.commit_short }}`
-            📅 **Build Date**: ${{ steps.fetch_run.outputs.created_at }}
-            📋 **Reason**: ${{ steps.check_notification.outputs.reason }}
-            🎯 **Artifacts**: ${{ steps.check_artifacts.outputs.artifact_count }} available
-            📝 **Files**: ${{ steps.check_artifacts.outputs.artifact_names }}
+            📦 *Repository*: `${{ env.TARGET_REPO }}`
+            ✅ *Commit*: `${{ steps.fetch_run.outputs.commit_short }}`
+            📅 *Build Date*: ${{ steps.fetch_run.outputs.created_at }}
             
-            🔗 **Download artifacts**:
+            🎯 *Artifacts*: ${{ steps.check_artifacts.outputs.artifact_count }} files available, including:
+            \`${{ steps.check_artifacts.outputs.artifact_names }}\`
+            
+            🔗 *Download from GitHub Actions*:
             ${{ steps.fetch_run.outputs.run_url }}
             
-            _Automated by GitHub Actions_ ⚡️
+            _Reason: ${{ steps.check_notification.outputs.reason }}. Automated by GitHub Actions_ ⚡️
 
       - name: Log workflow summary
         if: always()
         run: |
           echo "## 📊 LSPosed Monitor Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ "${{ steps.fetch_run.outputs.status }}" = "success" ]; then
-            echo "✅ **Status**: Successfully checked for new artifacts" >> $GITHUB_STEP_SUMMARY
-            echo "🔍 **Latest Run**: ${{ steps.fetch_run.outputs.run_id }}" >> $GITHUB_STEP_SUMMARY
-            echo "📝 **Commit**: \`${{ steps.fetch_run.outputs.commit_short }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **Status**: Successfully checked for new artifacts." >> $GITHUB_STEP_SUMMARY
+            echo "* **Latest Run**: [${{ steps.fetch_run.outputs.run_id }}](${{ steps.fetch_run.outputs.run_url }})" >> $GITHUB_STEP_SUMMARY
+            echo "* **Commit**: \`${{ steps.fetch_run.outputs.commit_short }}\`" >> $GITHUB_STEP_SUMMARY
             
             if [ "${{ steps.check_artifacts.outputs.has_artifacts }}" = "true" ]; then
-              echo "📦 **Artifacts**: ${{ steps.check_artifacts.outputs.artifact_count }} found" >> $GITHUB_STEP_SUMMARY
-              
+              echo "* **Artifacts**: ${{ steps.check_artifacts.outputs.artifact_count }} found" >> $GITHUB_STEP_SUMMARY
               if [ "${{ steps.check_notification.outputs.should_notify }}" = "true" ]; then
                 echo "🔔 **Notification**: Sent" >> $GITHUB_STEP_SUMMARY
-                echo "📋 **Reason**: ${{ steps.check_notification.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
               else
                 echo "🔕 **Notification**: Skipped" >> $GITHUB_STEP_SUMMARY
-                echo "📋 **Reason**: ${{ steps.check_notification.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
               fi
-            elif [ "${{ steps.check_artifacts.outputs.has_artifacts }}" = "false" ]; then
-              echo "📦 **Artifacts**: None found - notification skipped" >> $GITHUB_STEP_SUMMARY
+              echo "* **Reason**: ${{ steps.check_notification.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
             else
-              echo "📦 **Artifacts**: Error checking artifacts" >> $GITHUB_STEP_SUMMARY
+              echo "📦 **Artifacts**: None found." >> $GITHUB_STEP_SUMMARY
             fi
           else
-            echo "❌ **Status**: ${{ steps.fetch_run.outputs.status }}" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Status**: Failed to fetch workflow run data." >> $GITHUB_STEP_SUMMARY
           fi
           
           echo "" >> $GITHUB_STEP_SUMMARY
