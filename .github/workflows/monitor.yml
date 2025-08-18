@@ -216,7 +216,7 @@ jobs:
 
       - name: Check if notification is needed
         id: check_notification
-        if: steps.fetch_run.outputs.status == 'success' && steps.check_artifacts.outputs.has_artifacts == 'true'
+        if: steps.fetch_run.outputs.status == 'success' && (steps.check_artifacts.outputs.has_artifacts == 'true' || github.event.inputs.force_notification == 'true')
         run: |
           current_commit="${{ steps.fetch_run.outputs.commit_sha }}"
           force_notify="${{ github.event.inputs.force_notification || 'false' }}"
@@ -240,6 +240,9 @@ jobs:
           if [ "$force_notify" = "true" ]; then
             echo "should_notify=true" >> "$GITHUB_OUTPUT"
             echo "reason=Manual trigger (force notification)" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.check_artifacts.outputs.has_artifacts }}" != "true" ]; then
+            echo "should_notify=false" >> "$GITHUB_OUTPUT"
+            echo "reason=No artifacts found in latest run" >> "$GITHUB_OUTPUT"
           elif [ -z "$prev_commit" ]; then
             echo "should_notify=true" >> "$GITHUB_OUTPUT"
             echo "reason=First run with artifacts" >> "$GITHUB_OUTPUT"
@@ -301,16 +304,16 @@ jobs:
           format: markdown
           disable_web_page_preview: true
           message: |
-            🔔 *New LSPosed Artifact Available!*
+            🔔 *LSPosed Monitor Update*
             
             📦 *Repository*: `${{ env.TARGET_REPO }}`
             ✅ *Commit*: `${{ steps.fetch_run.outputs.commit_short }}`
             📅 *Build Date*: ${{ steps.fetch_run.outputs.created_at }}
             
-            🎯 *Artifacts*: ${{ steps.check_artifacts.outputs.artifact_count }} files available
-            📝 *Files*: ${{ steps.check_artifacts.outputs.artifact_names }}
+            ${{ steps.check_artifacts.outputs.has_artifacts == 'true' && format('🎯 *Artifacts*: {0} files available', steps.check_artifacts.outputs.artifact_count) || '📦 *Artifacts*: None found in this run' }}
+            ${{ steps.check_artifacts.outputs.has_artifacts == 'true' && format('📝 *Files*: {0}', steps.check_artifacts.outputs.artifact_names) || '' }}
             
-            🔗 [Download from GitHub Actions](${{ steps.fetch_run.outputs.run_url }})
+            🔗 [View Workflow Run](${{ steps.fetch_run.outputs.run_url }})
             
             _Reason: ${{ steps.check_notification.outputs.reason }}_
 
