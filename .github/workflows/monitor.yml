@@ -211,15 +211,27 @@ jobs:
             echo "has_artifacts=true" >> "$GITHUB_OUTPUT"
             echo "artifact_count=$artifact_count" >> "$GITHUB_OUTPUT"
             
-            # Get artifact names with better error handling
-            if artifact_names=$(echo "$artifacts_response" | jq -r '.[].name' | head -5 | tr '\n' ',' | sed 's/,$//'); then
-              if [ "$artifact_count" -gt 5 ]; then
-                echo "artifact_names=${artifact_names}, and $((artifact_count - 5)) more..." >> "$GITHUB_OUTPUT"
+            # Format artifacts as numbered list for better presentation
+            if [ "$artifact_count" -eq 1 ]; then
+              # Single artifact - display as simple name
+              if artifact_name=$(echo "$artifacts_response" | jq -r '.[0].name'); then
+                echo "artifact_list=$artifact_name" >> "$GITHUB_OUTPUT"
               else
-                echo "artifact_names=$artifact_names" >> "$GITHUB_OUTPUT"
+                echo "artifact_list=Failed to parse artifact name" >> "$GITHUB_OUTPUT"
               fi
             else
-              echo "artifact_names=Failed to parse artifact names" >> "$GITHUB_OUTPUT"
+              # Multiple artifacts - create numbered list
+              if artifact_list=$(echo "$artifacts_response" | jq -r 'to_entries | map("\(.key + 1). \(.value.name)") | join("\n")'); then
+                # For Telegram, we need to format it properly with line breaks
+                # Convert newlines to actual line breaks for the message
+                formatted_list=$(echo "$artifact_list" | sed ':a;N;$!ba;s/\n/\
+/g')
+                echo "artifact_list<<EOF" >> "$GITHUB_OUTPUT"
+                echo "$formatted_list" >> "$GITHUB_OUTPUT"
+                echo "EOF" >> "$GITHUB_OUTPUT"
+              else
+                echo "artifact_list=Failed to parse artifact names" >> "$GITHUB_OUTPUT"
+              fi
             fi
           else
             echo "has_artifacts=false" >> "$GITHUB_OUTPUT"
@@ -326,7 +338,7 @@ jobs:
             📅 *Build Date*: ${{ steps.fetch_run.outputs.created_at }}
             
             ${{ steps.check_artifacts.outputs.has_artifacts == 'true' && format('🎯 *Artifacts*: {0} files available', steps.check_artifacts.outputs.artifact_count) || '📦 *Artifacts*: None found in this run' }}
-            ${{ steps.check_artifacts.outputs.has_artifacts == 'true' && format('📝 *Files*: {0}', steps.check_artifacts.outputs.artifact_names) || '' }}
+            ${{ steps.check_artifacts.outputs.has_artifacts == 'true' && format('📝 *Files*:\n{0}', steps.check_artifacts.outputs.artifact_list) || '' }}
             
             🔗 [View Workflow Run](${{ steps.fetch_run.outputs.run_url }})
             
