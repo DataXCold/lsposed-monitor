@@ -224,8 +224,7 @@ jobs:
               if artifact_list=$(echo "$artifacts_response" | jq -r 'to_entries | map("\(.key + 1). \(.value.name)") | join("\n")'); then
                 # For Telegram, we need to format it properly with line breaks
                 # Convert newlines to actual line breaks for the message
-                formatted_list=$(echo "$artifact_list" | sed ':a;N;$!ba;s/\n/\
-/g')
+                formatted_list=$(echo "$artifact_list" | sed ':a;N;$!ba;s/\n/\/g')
                 echo "artifact_list<<EOF" >> "$GITHUB_OUTPUT"
                 echo "$formatted_list" >> "$GITHUB_OUTPUT"
                 echo "EOF" >> "$GITHUB_OUTPUT"
