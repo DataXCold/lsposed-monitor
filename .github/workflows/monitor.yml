@@ -24,7 +24,8 @@ on:
 
 env:
   TARGET_REPO: "JingMatrix/LSPosed"
-  CACHE_VERSION: "v2"
+  CACHE_VERSION: "v3"
+  TRACKING_FILE: "last_commit.txt"
 
 jobs:
   check-for-artifacts:
@@ -39,11 +40,22 @@ jobs:
         id: cache-restore
         uses: actions/cache/restore@v4
         with:
-          path: .github/tracking/last_commit_id.txt
-          key: ${{ runner.os }}-lsposed-monitor-${{ env.CACHE_VERSION }}
+          path: ${{ env.TRACKING_FILE }}
+          key: lsposed-monitor-${{ env.CACHE_VERSION }}
+          restore-keys: |
+            lsposed-monitor-
 
-      - name: Create tracking directory
-        run: mkdir -p .github/tracking
+      - name: Read previous commit from file
+        id: read_prev_commit
+        run: |
+          if [ -f "${{ env.TRACKING_FILE }}" ]; then
+            prev_commit=$(cat "${{ env.TRACKING_FILE }}" | tr -d '\n\r')
+            echo "prev_commit=$prev_commit" >> "$GITHUB_OUTPUT"
+            echo "📁 Found previous commit: $prev_commit"
+          else
+            echo "prev_commit=" >> "$GITHUB_OUTPUT"
+            echo "📁 No previous commit file found"
+          fi
 
       - name: Fetch latest successful workflow run
         id: fetch_run
@@ -230,12 +242,15 @@ jobs:
           fi
           
           # Read the commit SHA from the last successful notification
-          prev_commit=$(cat .github/tracking/last_commit_id.txt 2>/dev/null | tr -d '\n\r' || echo "")
+          prev_commit="${{ steps.read_prev_commit.outputs.prev_commit }}"
           
+          # Debug output
           echo "📊 Comparison:"
           echo "  Current Commit: $current_commit"
           echo "  Previous Commit: $prev_commit"
           echo "  Force Notify: $force_notify"
+          echo "  Has Artifacts: ${{ steps.check_artifacts.outputs.has_artifacts }}"
+          echo "  Cache Hit: ${{ steps.cache-restore.outputs.cache-hit }}"
           
           if [ "$force_notify" = "true" ]; then
             echo "should_notify=true" >> "$GITHUB_OUTPUT"
@@ -259,10 +274,10 @@ jobs:
         run: |
           current_commit="${{ steps.fetch_run.outputs.commit_sha }}"
           echo "✅ Updating tracking data for commit: $current_commit"
-          echo -n "$current_commit" > .github/tracking/last_commit_id.txt
+          echo -n "$current_commit" > "${{ env.TRACKING_FILE }}"
           
           # Verify the file was written correctly
-          written_commit=$(cat .github/tracking/last_commit_id.txt)
+          written_commit=$(cat "${{ env.TRACKING_FILE }}")
           if [ "$written_commit" = "$current_commit" ]; then
             echo "✅ Tracking file updated successfully"
           else
@@ -273,8 +288,8 @@ jobs:
         if: steps.check_notification.outputs.should_notify == 'true'
         uses: actions/cache/save@v4
         with:
-          path: .github/tracking/last_commit_id.txt
-          key: ${{ runner.os }}-lsposed-monitor-${{ env.CACHE_VERSION }}
+          path: ${{ env.TRACKING_FILE }}
+          key: lsposed-monitor-${{ env.CACHE_VERSION }}-${{ steps.fetch_run.outputs.commit_sha }}
 
       - name: Debug Telegram secrets
         if: steps.check_notification.outputs.should_notify == 'true'
